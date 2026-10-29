@@ -1,6 +1,6 @@
 # Riot Wards API
 
-Riot ACCOUNT-V1 / MATCH-V5로 지정한 유저의 와드 통계와 설치·제거 이벤트를 CSV 하나로 저장합니다.
+Riot ACCOUNT-V1 / MATCH-V5로 지정한 유저의 와드 설치·제거 타임라인과 경기 종료 통계를 CSV 두 개로 저장합니다.
 
 처음 실행하기 전에 `.env.example`을 `.env`로 복사하세요:
 
@@ -67,23 +67,24 @@ python3 riot_wards_csv.py --puuid 'YOUR_PUUID' --user-id 'Example Player#TAG' \
   `userId`는 분석용 계정 라벨이며 Riot API가 반환하는 별도 ID 필드가 아닙니다.
   이 CLI는 지정한 계정을 조회하며 로그인 세션을 자동으로 인식하지 않습니다.
 
-실행할 때마다 `merged_wards.csv` **하나만** 생성합니다.
+실행할 때마다 타임라인과 경기 종료 종합 통계를 **CSV 두 개로 나누어** 생성합니다.
 Excel에서 한글을 읽을 수 있는 UTF-8 BOM CSV입니다.
 
 | 파일 | 행 단위 | 내용 |
 |---|---|---|
-| `merged_wards.csv` | 대상 유저의 와드 이벤트 1건 | `puuid,userId,participants,participantId,creatorId,killerId,matchId` 순서로 시작. Riot ID/챔피언/라인, `timestamp,type,wardType`, 요청한 와드 통계 8개를 모두 함께 포함 |
+| `ward_timeline.csv` | 대상 유저의 와드 이벤트 1건 | 기존 A~N열의 14개 컬럼. 계정·경기·챔피언·라인과 `creatorId,killerId,timestamp,type,wardType` |
+| `ward_end_to_end.csv` | 대상 유저 × 경기당 1행 | 계정·경기·참가자 식별 정보 9개 + 기존 O~V열의 최종 와드 통계 8개 |
 
 `puuid`·`userId`로 유저를, `matchId`·`participantId`로 경기 안의 참가자를 구분합니다.
-와드 이벤트가 없는 경기도 한 행을 남기고 이벤트 관련 컬럼만 빈칸으로 둡니다.
-기존에 저장된 분리 CSV와 JSON은 그대로 보존하며, 새 실행에서는 만들지 않습니다.
+두 파일을 연결하려면 `puuid`·`userId`·`matchId`·`participantId`를 함께 사용하세요.
+와드 이벤트가 없는 경기는 타임라인에 가짜 이벤트 행을 만들지 않고 종합 통계에만 한 행을 저장합니다.
+기존에 저장된 CSV와 JSON은 그대로 보존합니다.
 
 `participants` 컬럼에는 `[{"participantId":2,"championName":"Lux"},…]` 형태의
 JSON 배열을 넣습니다. CSV에서 한 셀로 읽은 뒤 `json.loads()`로 복원할 수 있습니다.
 Riot 응답의 `metadata.participants`는 PUUID 목록이며, 여기의 컬럼은 요청한
 챔피언 정보를 연결하기 위해 `info.participants`에서 ID·챔피언만 추린 목록입니다.
-와드 통계는 해당 경기의 최종 통계가 이벤트마다 반복되는 값입니다.
-통계를 합산할 때는 `puuid`·`userId`·`matchId`·`participantId`별 중복을 제외하세요.
+최종 와드 통계는 종합 CSV에만 경기당 한 번 저장합니다. 타임라인에는 종합 통계를 반복하지 않습니다.
 중복 기재한 `controlWardsPlaced`는 하나의 컬럼으로 저장합니다.
 
 경기마다 `info.participants[].puuid`로 대상 유저를 찾아 `participantId`를 결정합니다.
