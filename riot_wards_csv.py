@@ -1,6 +1,7 @@
 """Export one Riot account's Match-V5 ward statistics and events (Python 3.10+)."""
 import argparse
 import csv
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
 import os
@@ -26,8 +27,11 @@ CHALLENGE_FIELDS = {
 }
 EVENT_FIELDS = IDENTITY + ['creatorId', 'killerId', 'matchId', 'riotIdGameName',
                            'riotIdTagline', 'championName', 'lane',
-                           'timestamp', 'type', 'wardType'] + STAT_FIELDS
-OUTPUT_FILENAME = 'merged_wards.csv'
+                           'timestamp', 'type', 'wardType']
+SUMMARY_FIELDS = IDENTITY + ['matchId', 'riotIdGameName', 'riotIdTagline',
+                             'championName', 'lane'] + STAT_FIELDS
+TIMELINE_FILENAME = 'ward_timeline.csv'
+SUMMARY_FILENAME = 'ward_end_to_end.csv'
 
 
 class RiotError(RuntimeError):
@@ -211,21 +215,25 @@ def export(client, puuid, user_id, match_ids, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     # Exclusive creation prevents an accidental overwrite of earlier exports.
-    destination = output / OUTPUT_FILENAME
-    if destination.exists():
+    specs = [(TIMELINE_FILENAME, EVENT_FIELDS), (SUMMARY_FILENAME, SUMMARY_FIELDS)]
+    if any((output / name).exists() for name, _ in specs):
         raise RiotError('출력 CSV가 이미 있습니다. 새로운 --output 폴더를 지정하세요.')
-    with destination.open('x', encoding='utf-8-sig', newline='') as handle:
-        writer = csv.DictWriter(handle, fieldnames=EVENT_FIELDS)
-        writer.writeheader()
+    with ExitStack() as stack:
+        writers = []
+        for name, fields in specs:
+            handle = stack.enter_context((output / name).open('x', encoding='utf-8-sig', newline=''))
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writers.append(writer)
         for index, match_id in enumerate(match_ids, 1):
             print(f'[{index}/{len(match_ids)}] {match_id}', file=sys.stderr)
             path = '/lol/match/v5/matches/' + quote(match_id, safe='')
             match = client.get(path)
             timeline = client.get(path + '/timeline')
             summary, events, _ = extract_match(match, timeline, puuid, user_id)
-            # Each event already carries this user's match statistics and roster.
-            # Retain matches without events, leaving event-specific columns blank.
-            writer.writerows(events or [summary])
+            writers[0].writerows(events)
+            # Exactly one final-stat row per match, even if no events occurred.
+            writers[1].writerow(summary)
 
 
 def main(argv=None):
@@ -299,11 +307,12 @@ def main(argv=None):
     except (RiotError, OSError, KeyError, TypeError) as exc:
         print(f'실패: {exc}', file=sys.stderr)
         if exporting:
-            print('출력 CSV에 완료한 경기만 남을 수 있습니다.', file=sys.stderr)
+            print('출력 CSV 두 개에 완료한 경기만 남을 수 있습니다.', file=sys.stderr)
         else:
             print('CSV 저장 전에 실패했습니다.', file=sys.stderr)
         return 1
-    print(f'완료: {len(ids)}경기 → {(args.output / OUTPUT_FILENAME).resolve()}')
+    print(f'완료: {len(ids)}경기 → {args.output.resolve()}')
+    print(f'타임라인: {TIMELINE_FILENAME} | 종합 통계: {SUMMARY_FILENAME}')
     return 0
 
 
