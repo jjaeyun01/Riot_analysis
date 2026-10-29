@@ -34,7 +34,7 @@ def fixture(slot=7):
 
 
 class ExtractionTests(unittest.TestCase):
-    def test_all_requested_fields_present_together_in_event_csv(self):
+    def test_timeline_and_final_stats_are_separate(self):
         match, timeline = fixture()
         target = match['info']['participants'][1]
         target['visionWardsBoughtInGame'] = 4
@@ -42,11 +42,17 @@ class ExtractionTests(unittest.TestCase):
         client = RiotClient('fake', 'americas')
         with TemporaryDirectory() as folder, patch.object(client, 'get', side_effect=[match, timeline]):
             export(client, 'target', 'Example Player#TAG', ['NA1_123'], folder)
-            with (Path(folder) / 'merged_wards.csv').open(encoding='utf-8-sig', newline='') as handle:
+            with (Path(folder) / 'ward_timeline.csv').open(encoding='utf-8-sig', newline='') as handle:
                 reader = csv.DictReader(handle)
                 self.assertEqual(reader.fieldnames[:6],
                                  ['puuid', 'userId', 'participants', 'participantId', 'creatorId', 'killerId'])
                 rows = list(reader)
+                self.assertEqual(reader.fieldnames[11:], ['timestamp', 'type', 'wardType'])
+            with (Path(folder) / 'ward_end_to_end.csv').open(encoding='utf-8-sig', newline='') as handle:
+                summary_reader = csv.DictReader(handle)
+                self.assertTrue(all(f not in summary_reader.fieldnames for f in ['timestamp', 'type', 'wardType', 'creatorId', 'killerId']))
+                summaries = list(summary_reader)
+            self.assertEqual(len(summaries), 1)
         expected = {
             'riotIdGameName': 'Example Player', 'championName': 'Ahri', 'lane': 'MIDDLE',
             'detectorWardsPlaced': '2', 'wardsKilled': '1', 'wardsPlaced': '3',
@@ -54,9 +60,11 @@ class ExtractionTests(unittest.TestCase):
             'wardTakedownsBefore20M': '1', 'controlWardTimeCoverageInRiverOrEnemyHalf': '0.25',
             'visionWardsBoughtInGame': '4',
         }
+        for key, value in expected.items():
+            self.assertEqual(summaries[0][key], value)
         for row in rows:
-            for key, value in expected.items():
-                self.assertEqual(row[key], value)
+            for stat in expected.keys() - {'riotIdGameName', 'championName', 'lane'}:
+                self.assertNotIn(stat, row)
             self.assertEqual(json.loads(row['participants']),
                              [{'participantId': 2, 'championName': 'Lux'},
                               {'participantId': 7, 'championName': 'Ahri'}])
@@ -102,12 +110,12 @@ class ExtractionTests(unittest.TestCase):
         client = RiotClient('fake', 'americas')
         with TemporaryDirectory() as folder, patch.object(client, 'get', side_effect=[match, timeline]):
             export(client, 'target', '한글,계정', ['NA1_123'], folder)
-            self.assertEqual([p.name for p in Path(folder).iterdir()], ['merged_wards.csv'])
-            with (Path(folder) / 'merged_wards.csv').open(encoding='utf-8-sig', newline='') as handle:
+            self.assertEqual(sorted(p.name for p in Path(folder).iterdir()), ['ward_end_to_end.csv', 'ward_timeline.csv'])
+            with (Path(folder) / 'ward_timeline.csv').open(encoding='utf-8-sig', newline='') as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]['userId'], '한글,계정')
-            self.assertEqual(rows[0]['wardsPlaced'], '3')
+            self.assertNotIn('wardsPlaced', rows[0])
             self.assertEqual(json.loads(rows[0]['participants'])[0],
                              {'participantId': 2, 'championName': 'Lux'})
             with self.assertRaises(RiotError):
@@ -122,13 +130,15 @@ class ExtractionTests(unittest.TestCase):
         client = RiotClient('fake', 'americas')
         with TemporaryDirectory() as folder, patch.object(client, 'get', side_effect=[match, timeline]):
             export(client, 'target', 'account', ['NA1_123'], folder)
-            with (Path(folder) / 'merged_wards.csv').open(encoding='utf-8-sig', newline='') as handle:
+            with (Path(folder) / 'ward_timeline.csv').open(encoding='utf-8-sig', newline='') as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+            with (Path(folder) / 'ward_end_to_end.csv').open(encoding='utf-8-sig', newline='') as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]['wardsPlaced'], '3')
             self.assertEqual(rows[0]['wardTakedownsBefore20M'], '')
             for field in ('creatorId', 'killerId', 'timestamp', 'type', 'wardType'):
-                self.assertEqual(rows[0][field], '')
+                self.assertNotIn(field, rows[0])
 
     def test_multiple_matches_keep_their_own_stats_and_actor_ids(self):
         first, first_timeline = fixture(slot=7)
@@ -139,23 +149,38 @@ class ExtractionTests(unittest.TestCase):
         with TemporaryDirectory() as folder, patch.object(client, 'get',
                 side_effect=[first, first_timeline, second, second_timeline]):
             export(client, 'target', 'account', ['NA1_123', 'NA1_456'], folder)
-            with (Path(folder) / 'merged_wards.csv').open(encoding='utf-8-sig', newline='') as handle:
+            with (Path(folder) / 'ward_timeline.csv').open(encoding='utf-8-sig', newline='') as handle:
                 rows = list(csv.DictReader(handle))
+            with (Path(folder) / 'ward_end_to_end.csv').open(encoding='utf-8-sig', newline='') as handle:
+                summaries = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 4)
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual({(r['matchId'], r['participantId'], r['wardsPlaced']) for r in summaries},
+                         {('NA1_123', '7', '3'), ('NA1_456', '9', '8')})
         for row in rows:
             expected_slot, expected_wards = ('7', '3') if row['matchId'] == 'NA1_123' else ('9', '8')
             self.assertEqual(row['participantId'], expected_slot)
-            self.assertEqual(row['wardsPlaced'], expected_wards)
+            self.assertNotIn('wardsPlaced', row)
             actor = 'creatorId' if row['type'] == 'WARD_PLACED' else 'killerId'
             self.assertEqual(row[actor], expected_slot)
 
     def test_empty_match_list_writes_only_header(self):
         with TemporaryDirectory() as folder:
             export(RiotClient('fake', 'americas'), 'target', 'account', [], folder)
-            with (Path(folder) / 'merged_wards.csv').open(encoding='utf-8-sig', newline='') as handle:
-                reader = csv.DictReader(handle)
-                self.assertIn('participants', reader.fieldnames)
-                self.assertEqual(list(reader), [])
+            for name in ('ward_timeline.csv', 'ward_end_to_end.csv'):
+                with (Path(folder) / name).open(encoding='utf-8-sig', newline='') as handle:
+                    reader = csv.DictReader(handle)
+                    self.assertIn('participants', reader.fieldnames)
+                    self.assertEqual(list(reader), [])
+
+    def test_existing_summary_prevents_partial_export_or_overwrite(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / 'ward_end_to_end.csv'
+            path.write_text('existing result')
+            with self.assertRaises(RiotError):
+                export(RiotClient('fake', 'americas'), 'target', 'account', [], folder)
+            self.assertEqual(path.read_text(), 'existing result')
+            self.assertFalse((Path(folder) / 'ward_timeline.csv').exists())
 
 
 class EnvTests(unittest.TestCase):
